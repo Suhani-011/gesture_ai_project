@@ -2,18 +2,35 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import pickle
+import time
+import keyboard
 from tensorflow.keras.models import load_model
 
+# ---------------- LOAD MODEL ----------------
 model = load_model("model/gesture_model.h5")
 
 with open("model/label_encoder.pkl", "rb") as f:
     encoder = pickle.load(f)
 
+# ---------------- MEDIAPIPE ----------------
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands()
 mp_draw = mp.solutions.drawing_utils
 
+# ---------------- CAMERA ----------------
 cap = cv2.VideoCapture(0)
+
+cv2.namedWindow("Gesture Control", cv2.WINDOW_NORMAL)
+
+# ---------------- CONTROL ----------------
+last_action_time = 0
+cooldown = 2.5
+
+prev_label = ""
+stable_count = 0
+
+popup_text = ""
+popup_time = 0
 
 while True:
     success, frame = cap.read()
@@ -24,8 +41,9 @@ while True:
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb)
 
-    label = ""
+    label = "Detecting"
     hand_type = ""
+    cx, cy = 0, 0
 
     if results.multi_hand_landmarks:
         for i, handLms in enumerate(results.multi_hand_landmarks):
@@ -33,23 +51,17 @@ while True:
             if results.multi_handedness:
                 hand_type = results.multi_handedness[i].classification[0].label
 
-            mp_draw.draw_landmarks(
-                frame,
-                handLms,
-                mp_hands.HAND_CONNECTIONS,
-                mp_draw.DrawingSpec(color=(220, 220, 220), thickness=2, circle_radius=2),
-                mp_draw.DrawingSpec(color=(100, 100, 100), thickness=2)
-            )
+            mp_draw.draw_landmarks(frame, handLms, mp_hands.HAND_CONNECTIONS)
 
             h, w, _ = frame.shape
-            x_list = [int(lm.x * w) for lm in handLms.landmark]
-            y_list = [int(lm.y * h) for lm in handLms.landmark]
 
-            xmin, xmax = min(x_list), max(x_list)
-            ymin, ymax = min(y_list), max(y_list)
+            # -------- COORDINATES --------
+            index_tip = handLms.landmark[8]
+            cx, cy = int(index_tip.x * w), int(index_tip.y * h)
 
-            cv2.rectangle(frame, (xmin-25, ymin-25), (xmax+25, ymax+25), (80,80,80), 2)
+            cv2.circle(frame, (cx, cy), 5, (0, 0, 0), -1)
 
+            # -------- DATA --------
             data = []
             for lm in handLms.landmark:
                 data.append(lm.x)
@@ -64,29 +76,81 @@ while True:
                 class_id = np.argmax(pred)
                 label = encoder.inverse_transform([class_id])[0]
 
-                # OK FIX
-                thumb_tip = handLms.landmark[4]
-                index_tip = handLms.landmark[8]
-
-                dist = ((thumb_tip.x - index_tip.x)**2 +
-                        (thumb_tip.y - index_tip.y)**2)**0.5
-
-                if dist < 0.05:
-                    label = "OK"
+            # -------- STABILITY --------
+            if label == prev_label:
+                stable_count += 1
             else:
-                label = "Detecting..."
+                stable_count = 0
 
-            cv2.rectangle(frame, (xmin-25, ymin-80), (xmax+25, ymin-25), (20,20,20), -1)
+            prev_label = label
+            current_time = time.time()
 
-            text = f"{hand_type} | {label}"
-            size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-            text_x = xmin + (xmax-xmin)//2 - size[0]//2
+            # -------- ACTION --------
+            if stable_count > 12 and (current_time - last_action_time > cooldown):
 
-            cv2.putText(frame, text, (text_x, ymin-40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (255,255,255), 2, cv2.LINE_AA)
+                if label in ["PAUSE", "PLAY"]:
+                    keyboard.send("play/pause media")
+                    popup_text = "PLAY / PAUSE"
 
-    cv2.imshow("AI Gesture System", frame)
+                elif label == "VOLUP":
+                    for _ in range(5):
+                        keyboard.send("volume up")
+                        time.sleep(0.03)
+                    popup_text = "VOLUME UP"
+
+                elif label == "VOLDOWN":
+                    for _ in range(5):
+                        keyboard.send("volume down")
+                        time.sleep(0.03)
+                    popup_text = "VOLUME DOWN"
+
+                elif label == "NEXT":
+                    keyboard.send("next track")
+                    popup_text = "NEXT"
+
+                elif label == "PREV":
+                    keyboard.send("previous track")
+                    popup_text = "PREVIOUS"
+
+                popup_time = current_time
+                last_action_time = current_time
+                stable_count = 0
+
+    # -------- MINIMAL HEADER --------
+    cv2.putText(frame, "Gesture Control",
+                (10, 30),
+                cv2.FONT_HERSHEY_COMPLEX,
+                0.8,
+                (0, 0, 0), 2)
+
+    # -------- INFO TEXT (NO BOXES) --------
+    cv2.putText(frame, f"{label}",
+                (10, 70),
+                cv2.FONT_HERSHEY_COMPLEX,
+                0.9,
+                (0, 0, 0), 2)
+
+    cv2.putText(frame, f"{hand_type}",
+                (10, 100),
+                cv2.FONT_HERSHEY_COMPLEX,
+                0.6,
+                (50, 50, 50), 1)
+
+    cv2.putText(frame, f"({cx}, {cy})",
+                (10, 125),
+                cv2.FONT_HERSHEY_COMPLEX,
+                0.5,
+                (80, 80, 80), 1)
+
+    # -------- CLEAN POPUP --------
+    if time.time() - popup_time < 1.2:
+        cv2.putText(frame, popup_text,
+                    (frame.shape[1]//2 - 100, frame.shape[0]//2),
+                    cv2.FONT_HERSHEY_COMPLEX,
+                    1,
+                    (0, 0, 0), 3)
+
+    cv2.imshow("Gesture Control", frame)
 
     if cv2.waitKey(1) & 0xFF == 27:
         break
